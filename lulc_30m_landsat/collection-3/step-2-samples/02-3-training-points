@@ -1,0 +1,364 @@
+// STEP 2-3: TRAINING SAMPLE GENERATION AND VARIABLE SELECTION v1.1
+// MARCH 2025
+
+var param = {
+  regionId: 21001,
+  country: 'BOLIVIA',
+  gridName: '',
+  sampleSize: 2000,        // target total number of samples
+  minSamples: 1000,        // minimum samples per class
+  yearsProcess: [2020, 2021, 2022, 2023, 2024],
+  yearsPreview: [2022, 2023, 2024],
+  excluir: [],              // classes to exclude, e.g. ['ID30','ID13']
+  tilescale: 5,             // increase if export fails
+  variables: [],            // spectral bands / indices to include
+  ciclo: 'ciclo-1',
+  inputPixelEstable: 1,
+  inputClassArea: 1,
+  ouputversion: 1,
+};
+
+// Self‑invoked function that executes the workflow
+(function init(param) {
+  
+  var assets = {
+    grids: 'projects/mapbiomas-raisg/DATOS_AUXILIARES/VECTORES/grid-world',
+    regions: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/VECTOR/clasificacion-regiones-7-b250m',
+    regionsRaster: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/RASTER/clasificacion-regiones-7',
+    mosaics: {
+      v1: 'projects/nexgenmap/MapBiomas2/LANDSAT/PANAMAZON/mosaics-2', // 1985-2022
+      v2: 'projects/mapbiomas-raisg/MOSAICOS/mosaics-2',               // 2023
+      v3: 'projects/mapbiomas-bolivia/assets/MOSAICS/mosaics-2',        // 2024
+    },
+    referenceImage: 'projects/mapbiomas-public/assets/bolivia/collection2/mapbiomas_bolivia_collection2_integration_v1',
+    /*
+ * NOTE: The asset paths below are examples from the original script.
+ * You must replace them with your own Earth Engine asset paths, especially
+ * the 'outputs' path where your classification results will be stored.
+ * Ensure you have write permissions to the output folder.
+ */
+    stablePixels: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/01-stable-sample/',
+    classAreas: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/02-CLASS-AREA/',
+    outputs: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/03-TRAIN-SAMPLE/'
+  };
+  
+  var rgb = ['swir1_median', 'nir_median', 'red_median'];
+  var years = param.yearsPreview;
+  var grid = param.gridName;
+  var regionId = param.regionId;
+  
+  // Get version numbers based on the cycle
+  var version = getVersion(param.ciclo);
+  var vMuestras = version.version_input_muestras;
+  var vAreas = version.version_input_areas;
+  
+  // Create mask from region vector and optional grid
+  var region = getRegion(assets.regions, assets.grids, regionId, grid);
+  var vector = region.vector;
+  
+  // Load mosaics for the region
+  var mosaicPath = [assets.mosaics.v1, assets.mosaics.v2, assets.mosaics.v3];
+  var mosaic = getMosaic(mosaicPath, regionId, param.variables, grid, vector);
+
+  var country = region.vector.first().get('PAIS').getInfo().toUpperCase();
+  country = country.replace('Ú', 'U').replace(' ', '_');
+  var countryRegion = country + '-' + regionId;
+
+  // Stable pixels image (reference)
+  var stablePixels = ee.Image(
+    assets.stablePixels + 'ME-' + countryRegion + '-' + vMuestras)
+    .updateMask(region.rasterMask).rename('reference');
+
+  // Class areas feature collection (pre‑computed)
+  var classAreas = ee.FeatureCollection(
+    assets.classAreas + 'ac-' + countryRegion + '-' + vAreas);
+    
+  var classAreasDictionary = classAreas.first().toDictionary();
+  
+  var classNames = classAreasDictionary.keys()
+    .filter(ee.Filter.stringContains('item', 'ID'))
+    .filter(ee.Filter.notEquals('item', 'ORIG_FID'))
+    .filter(ee.Filter.notEquals('item', 'FID_bioma_'))
+    .filter(ee.Filter.inList('item', param.excluir).not());
+  
+  // Extract class IDs (numeric) from property names
+  var classIds = classNames.map(function(name) {
+    var classId = ee.String(name).split('D').get(1);
+    return ee.Number.parse(classId);
+  });
+
+  // Compute areas for each class and total area
+  var areas = classNames.map(function(name) {
+    return classAreasDictionary.get(name);
+  });
+  var totalArea = areas.reduce(ee.Reducer.sum());
+
+  // Weighted sample count per class (proportional to area, with minimum)
+  var pointsPerClass = areas.map(function(area) {
+    return getPointsByArea(area, totalArea, param.sampleSize, param.minSamples);
+  });
+  
+  // Generate training points
+  var training = getSamples(stablePixels, vector, mosaic, classIds, pointsPerClass);
+  var points = training.points;
+
+  // Visualisation layers
+  var rgbMosaic = getMosaic(mosaicPath, regionId, rgb, grid, vector);
+  addLayersToMap(points, stablePixels, rgbMosaic, years, vector);
+  
+  // Export training samples per year
+  if (grid && grid !== '') regionId = regionId + '-' + grid;
+  var outputs = assets.outputs;
+  var data = training.data;
+  exportSamples(data, outputs, country, regionId, version.version_out);
+
+  // Console output with summary statistics
+  var zipped = classNames.zip(areas).zip(pointsPerClass);
+  zipped = zipped.map(function(item) {
+    item = ee.List(item);
+    var item0 = ee.List(item.get(0));
+    var id = ee.String(item0.get(0)).replace('ID', 'Class ');
+    var area = ee.String(item0.get(1));
+    var points = ee.String(item.get(1));
+    return ee.String(id)
+      .cat(', Area: ').cat(area)
+      .cat(', Samples: ').cat(points);
+  });
+  zipped = zipped.filter(ee.Filter.stringContains('item', ': 0.0,').not());
+  
+  var samples = zipped.map(function(item) {
+    var points = ee.String(item).split('Samples: ');
+    points = ee.List(points).get(1);
+    return ee.Number.parse(points);
+  });
+  
+  var global = ee.Dictionary.fromLists(
+    ['Total area', 'Total samples'],
+    [totalArea, samples.reduce(ee.Reducer.sum())]
+  );
+  
+  print('Stable pixels', stablePixels);
+  print('Mosaics', mosaic);
+  print('Areas', classAreas.first());
+  print('Global statistics', global);
+  print('Per‑class statistics', zipped);
+      
+})(param);
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+// Return version numbers based on the cycle
+function getVersion(cicle) {
+  return {
+    version_input_areas: param.inputClassArea,
+    version_input_muestras: param.inputPixelEstable,
+    version_out: param.ouputversion
+  };
+}
+
+// List of all years to process (used in stratified sampling)
+function ALL_YEARS() {
+  return param.yearsProcess;
+}
+
+// Extract region of interest (vector + raster mask)
+function getRegion(regionPath, gridPath, regionId, gridName) {
+  var region = ee.FeatureCollection(regionPath)
+    .filterMetadata("id_regionc", "equals", regionId);
+  
+  return {
+    vector: region,
+    rasterMask: ee.Image().paint(region, 1)
+  };
+}
+
+// Load mosaic images for the region, add auxiliary bands (altitude, slope, HAND, etc.)
+function getMosaic(paths, regionId, variables, gridName, regionVector) {
+  
+  // Altitude (JAXA ALOS)
+  var altitude = ee.Image('JAXA/ALOS/AW3D30_V1_1')
+    .select('AVE')
+    .rename('altitude');
+  var slope = ee.Terrain.slope(altitude).int8().rename('slope');
+  
+  // HAND data (Height Above Nearest Drainage) – multiple scales
+  var hand30_100 = ee.ImageCollection('users/gena/global-hand/hand-100')
+    .mosaic().focal_mean(0.1).rename('hand30_100');
+  var hand30_1000 = ee.Image("users/gena/GlobalHAND/30m/hand-1000").rename('hand30_1000');
+  var hand90_1000 = ee.Image("users/gena/GlobalHAND/90m-global/hand-1000").rename('hand90_1000');
+  var hand30_5000 = ee.Image("users/gena/GlobalHAND/30m/hand-5000").rename('hand30_5000');
+  
+  // Water masks based on HAND thresholds
+  var swbd = ee.Image('MODIS/MOD44W/MOD44W_005_2000_02_24').select('water_mask');
+  var swbdMask = swbd.unmask().not().focal_median(1);
+  var thresholds = [0, 1, 2, 5, 10];
+  var HANDm = thresholds.map(function(th) {
+    return hand30_100.lte(th)
+      .focal_max(1)
+      .focal_mode(2, 'circle', 'pixels', 5)
+      .mask(swbdMask)
+      .rename('water_HAND_' + th + 'm');
+  });
+  var HAND_water = ee.ImageCollection(HANDm).toBands();
+  
+  var Hand_bands = hand30_100
+    .addBands(hand30_1000)
+    .addBands(hand30_5000)
+    .addBands(hand90_1000)
+    .addBands(HAND_water);
+  
+  // Longitude / latitude
+  var longLat = ee.Image.pixelLonLat();
+  
+  // Shade mask (pre‑computed)
+  var shademask2 = ee.Image("projects/mapbiomas-raisg/MOSAICOS/shademask2_v3").rename('shademask2');
+  
+  // Slope position (pre‑computed)
+  var slppost = ee.Image("projects/mapbiomas-raisg/MOSAICOS/slppost2_30_v3").rename('slppost');
+  
+  // Merge all mosaic collections
+  var workspace_c3_v2 = ee.ImageCollection(paths[0])
+    .merge(ee.ImageCollection(paths[1]))
+    .merge(ee.ImageCollection(paths[2]));
+    
+  var joinedMosaics = workspace_c3_v2.map(function(image) {
+    return ee.Image.cat(image, altitude, slope, longLat, Hand_bands, slppost, shademask2);
+  });
+  
+  joinedMosaics = joinedMosaics.filterBounds(regionVector);
+  
+  if (variables.length > 0) {
+    return joinedMosaics.select(variables);
+  } else {
+    return joinedMosaics;
+  }
+}
+
+// Compute number of training samples per class (area‑weighted, with minimum)
+function getPointsByArea(singleArea, totalArea, sampleSize, minSamples) {
+  return ee.Number(singleArea)
+    .divide(totalArea)
+    .multiply(sampleSize)
+    .round()
+    .int16()
+    .max(minSamples);
+}
+
+// Stratified sampling: generate points for each year
+function getSamples(stablePixels, region, mosaic, classIds, pointsPerClass) {
+  
+  var years = ee.List(ALL_YEARS());
+  
+  var keys = years.map(function(year) {
+    return ee.String('samples-').cat(ee.String(year));
+  });
+  
+  // Base points (one set, used for all years)
+  var points = stablePixels
+    .addBands(ee.Image.pixelLonLat())
+    .stratifiedSample({
+      numPoints: 0,
+      classBand: 'reference',
+      region: region,
+      scale: 30,
+      seed: 1,
+      geometries: true,
+      dropNulls: true,
+      classValues: classIds,
+      classPoints: pointsPerClass
+    });
+  
+  var trainingSamples = years.map(function(year) {
+    var yearMosaic = mosaic
+      .filterMetadata('year', 'equals', year)
+      .filterBounds(region)
+      .mosaic();
+    
+    var training = stablePixels
+      .addBands(yearMosaic)
+      .sampleRegions({
+        collection: points,
+        properties: ['reference'],
+        tileScale: param.tilescale,
+        scale: 30,
+        geometries: true
+      });
+    
+    return training;
+  });
+  
+  return {
+    data: ee.Dictionary.fromLists(keys, trainingSamples),
+    points: points
+  };
+}
+
+// Add visualisation layers to the map
+function addLayersToMap(training, stablePixels, mosaic, years, region) {
+  
+  var palette = [
+    'ffffff', '129912', '1f4423', '1f8d49', '7dc975', '687537', '76A5AF',
+    '29eee4', '77a605', '935132', 'bbfcac', '519799', 'd6bc74', 'F1C232',
+    'ffffb2', 'edde8e', 'f6b26b', 'f99f40', 'E974ED', 'd5a6bd', 'c27ba0',
+    'ffefc3', 'ea9999', 'ffa07a', 'aa0000', 'ff8585', '0000ff', 'd5d5e5',
+    'dd497f', 'ffaa5f', 'ff0000', '8a2be2', '968c46', '2532e4', '93dfe6',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', 'f5d5d5', 'efffea',
+    'dd497f', 'b2ae7c', 'af2a2a', 'a89358', '968c46', 'ff99b9', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff'
+  ];
+  
+  var vis = { min: 0, max: 76, palette: palette };
+  var vismos = {
+    bands: ['swir1_median', 'nir_median', 'red_median'],
+    gain: [0.08, 0.06, 0.2],
+    gamma: 0.65
+  };
+
+  years.forEach(function(year) {
+    var filtered = mosaic
+      .filterMetadata('year', 'equals', year)
+      .mosaic()
+      .clip(region);
+    Map.addLayer(filtered, vismos, 'MOSAIC ' + year.toString(), false);
+  });
+
+  var styledPoints = ee.FeatureCollection(training).map(function(point) {
+    var classId = point.get('reference');
+    var color = ee.List(palette).get(classId);
+    return point.set({ style: { color: color } });
+  });
+
+  Map.addLayer(stablePixels, vis, 'STABLE PIXELS');
+  Map.addLayer(region.style({ fillColor: '00000066' }), {}, 'REGION');
+  Map.addLayer(styledPoints.style({ styleProperty: "style", width: 1.5 }), {}, 'TRAINING SAMPLES');
+}
+
+// Export training samples per year to GEE Assets
+function exportSamples(samples, outputDir, country, regionId, version) {
+  
+  var years = ALL_YEARS();
+  
+  years.forEach(function(year) {
+    var sampleYear = samples.get('samples-' + year);
+    var yearInt = parseInt(year, 10);
+    
+    var collection = ee.FeatureCollection(sampleYear)
+      .map(function(feature) {
+        return feature.set('year', yearInt);
+      });
+
+    var filename = 'samples-' + country + '-' + regionId + '-' + 
+      year + '-' + 'p03' + '-' + version;
+    
+    Export.table.toAsset(
+      collection,
+      'P02-3-' + filename,
+      outputDir + filename
+    );
+  });
+}

@@ -1,0 +1,148 @@
+// STEP 3-1: SAMPLE ANALYSIS USING BOXPLOT DIAGRAMS
+// MARCH 2025
+
+var param = {
+  country: 'BOLIVIA',
+  regionId: 21001,
+  years: [2020, 2021, 2022, 2023, 2024],
+  variables: [],
+  yearsPreview: [2020, 2021, 2022, 2023, 2024],
+  driveFolder: 'RF-PRELIMINAR-CLASSIFICATION',
+  samplesVersion: 1,
+  outputVersion: 1,
+  coleccion: 5,
+  versionCol: 4,
+  VerificarIndicesPuntos: false,
+  ClasesIndices: [
+    // [class, [indices]]
+    [3, ['ndvi_median', 'ndvi_amp', 'ndfi_median', 'ndfi_amp']]
+  ],
+};
+
+print('Starting statistics processing...');
+
+var assets = {
+  coleccion: 'projects/mapbiomas-public/assets/bolivia/collection2/mapbiomas_bolivia_collection2_integration_v1',
+  regions: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/VECTOR/clasificacion-regiones-7-b250m',
+  regionsRaster: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/RASTER/clasificacion-regiones-7',
+  mosaics: {
+    v1: 'projects/nexgenmap/MapBiomas2/LANDSAT/PANAMAZON/mosaics-2', // 1985-2022
+    v2: 'projects/mapbiomas-raisg/MOSAICOS/mosaics-2',               // 2023
+    v3: 'projects/mapbiomas-bolivia/assets/MOSAICS/mosaics-2',        // 2024
+  },
+/*
+ * NOTE: The asset paths below are examples from the original script.
+ * You must replace them with your own Earth Engine asset paths, especially
+ * the 'outputs' path where your classification results will be stored.
+ * Ensure you have write permissions to the output folder.
+ */
+  samples: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/03-TRAIN-SAMPLE/',
+  basePath: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/',
+  stablePixels: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/01-stable-sample/',
+};
+
+// Compute per‑year boxplot statistics for a given class and index
+var getStats = function(feat, clase, Nindice, ye) {
+  var res = feat
+    .filter(ee.Filter.eq('reference', clase))
+    .filter(ee.Filter.eq('year', ye));
+  
+  var CalcularEstadisticas = function() {
+    var p1 = ee.Number(res.reduceColumns(ee.Reducer.percentile([25]), [Nindice]).get('p25'));
+    var p2 = ee.Number(res.reduceColumns(ee.Reducer.percentile([50]), [Nindice]).get('p50'));
+    var p3 = ee.Number(res.reduceColumns(ee.Reducer.percentile([75]), [Nindice]).get('p75'));
+    var p4 = ee.Number(res.reduceColumns(ee.Reducer.percentile([100]), [Nindice]).get('p100'));
+    var mean = ee.Number(feat.reduceColumns(ee.Reducer.mean(), [Nindice]).get('mean'));
+    var median = ee.Number(feat.reduceColumns(ee.Reducer.median(), [Nindice]).get('median'));
+    var IQR = p3.add(p1.multiply(-1));
+    var LimInf = p1.add(IQR.multiply(-1.5));
+    var LimSup = p3.add(IQR.multiply(1.5));
+
+    return ee.FeatureCollection(ee.Feature(null, {
+      clase: clase,
+      Nindice: Nindice,
+      year: ye,
+      mean: mean,
+      median: median,
+      p1: p1,
+      p2: p2,
+      p3: p3,
+      p4: p4,
+      IQR: IQR,
+      LimInf: LimInf,
+      LimSup: LimSup,
+    }));
+  };
+  
+  return ee.Algorithms.If(res.size().gt(0), CalcularEstadisticas(), ee.FeatureCollection([]));
+};
+
+// Optional: print sample counts for verification
+var Veriricar = function(feat, clase, Nindice, ye) {
+  var res = feat
+    .filter(ee.Filter.eq('reference', clase))
+    .filter(ee.Filter.eq('year', ye));
+  print('class-' + clase + '-' + ye, res.size());
+};
+
+// Aggregate annual statistics across years and print summary values
+var getStatsAnualTotal = function(feat, clase, Indices) {
+  print('Stats Class-' + clase);
+  
+  Indices.forEach(function(ind, i) {
+    var filtro = feat
+      .filter(ee.Filter.eq('Nindice', ind))
+      .filter(ee.Filter.eq('clase', clase));
+    
+    var AddStats = function(mat) {
+      var MedianLimInf = ee.Number(filtro.reduceColumns(ee.Reducer.mean(), ['LimInf']).get('mean'));
+      var MedianLimSup = ee.Number(filtro.reduceColumns(ee.Reducer.mean(), ['LimSup']).get('mean'));
+      var mean = ee.Number(filtro.reduceColumns(ee.Reducer.mean(), ['mean']).get('mean'));
+      var median = ee.Number(filtro.reduceColumns(ee.Reducer.mean(), ['median']).get('mean'));
+      return [MedianLimInf, MedianLimSup, mean, median];
+    };
+    
+    var array = ee.List(ee.Algorithms.If(filtro.size().gt(0), AddStats(), [0, 0, 0, 0]));
+    
+    print(ee.String(ind + '-MedLimInf').cat(' ').cat(array.get(0)));
+    print(ee.String(ind + '-MedLimSup').cat(' ').cat(array.get(1)));
+    print(ee.String(ind + '-mean').cat('  ').cat(array.get(2)));
+    print(ee.String(ind + '-median').cat('  ').cat(array.get(3)));
+  });
+  
+  return []; // The function only prints, does not return a collection
+};
+
+// Main processing loop over years
+var SamplesReg = ee.FeatureCollection([]);
+var ResSamplesAnual = ee.FeatureCollection([]);
+var Samp;
+
+param.years.forEach(function(y) {
+  // Load training samples for this year (expected naming convention)
+  Samp = ee.FeatureCollection(assets.samples + 'samples-BOLIVIA-' + param.regionId + '-' + y + '-p03-1');
+  SamplesReg = SamplesReg.merge(Samp);
+  
+  param.ClasesIndices.forEach(function(clase) {
+    clase[1].forEach(function(indice) {
+      if (param.VerificarIndicesPuntos) {
+        Veriricar(Samp, clase[0], indice, y);
+      } else {
+        ResSamplesAnual = ResSamplesAnual.merge(getStats(Samp, clase[0], indice, y));
+      }
+    });
+  });
+  
+  if (param.yearsPreview.indexOf(y) > -1) {
+    Map.addLayer(Samp, {}, 'Sample-' + y);
+  }
+});
+
+print('Computing statistics for region ' + param.regionId);
+
+if (!param.VerificarIndicesPuntos) {
+  param.ClasesIndices.forEach(function(clase) {
+    getStatsAnualTotal(ResSamplesAnual, clase[0], clase[1]);
+    print('--------------------------------------------');
+  });
+}

@@ -1,0 +1,427 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var add_samp_15 = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.FeatureCollection(
+        [ee.Feature(
+            ee.Geometry.Polygon(
+                [[[-70.44405823309776, 2.2414425274252405],
+                  [-70.4571044977462, 2.2325229383674814],
+                  [-70.44886475165245, 2.2215449083140015],
+                  [-70.42551880438683, 2.224289423492906]]]),
+            {
+              "id": 15,
+              "system:index": "0"
+            }),
+        ee.Feature(
+            ee.Geometry.Polygon(
+                [[[-70.42757874091026, 2.277806441137374],
+                  [-70.41933899481651, 2.2599676538690887],
+                  [-70.39873962958214, 2.26065376513581],
+                  [-70.39805298407433, 2.2750620266627446]]]),
+            {
+              "id": 15,
+              "system:index": "1"
+            })]),
+    add_samp_3 = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.FeatureCollection(
+        [ee.Feature(
+            ee.Geometry.Point([-77.03298856046592, -14.681648876860509]),
+            {
+              "id": 3,
+              "system:index": "0"
+            })]),
+    sacar_muestras = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[-71.32845623378894, -19.12476585721214],
+          [-71.43831951503894, -18.984577045634797],
+          [-71.39437420253894, -19.150713728540207]]]);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// STEP 3-2: REGION CLASSIFICATION v1.1
+// MARCH 2025
+
+var param = {
+  country: 'BOLIVIA',
+  regionId: 21001,
+  trees: 120,
+  years: [2023, 2024],
+  // Class - Index - Lower bound - Upper bound (for filtering samples)
+  FiltroIndices: [
+  //Class, index,      LimSup,              LimInf  
+    [3, 'ndvi_median', 15430.112403100775, 19900.034883720928],
+    [3, "ndfi_median", 129.0, 225.0],
+    [6, 'ndvi_median', 17423.92391304348, 18703.77898550724],
+    [6, "ndwi_gao_dry", 7525.634615384615, 10713.542307692309],
+    [12, 'ndvi_median', 13715.294871794871, 18223.13076923077],
+    [15, 'ndvi_median', 13910.561403508775, 17637.242105263158],
+    [18, 'ndvi_median', 11980.866666666665, 15059.000000000004],
+    [21, 'ndvi_median', 14595.04545454546, 18552.499999999996],
+    [24, 'ndbi_median', 12720.384615384615, 12720.384615384615], 
+    [25, 'ndvi_median', 13959.35559006211, 16635.169254658384],
+    [33, "ndwi_gao_wet", 10948.591397849463, 19363.903225806454]
+  ],
+  variables: [
+    // List of predictor variables (commented out in original, kept empty)
+  ],
+  tileScale: 4,
+  additionalSamples: {
+    polygons: [add_samp_15],
+    classes: [15],
+    points: [500, 200]
+  },
+  yearsPreview: [2023],
+  driveFolder: 'RF-PRELIMINAR-CLASSIFICATION',
+  samplesVersion: 1,
+  inputPixelEstable: 1,
+  inputClassArea: 1,
+  outputVersion: 1,
+};
+
+// -----------------------------------------------------------------------------
+// Initialization
+// -----------------------------------------------------------------------------
+
+var region = ee.FeatureCollection('projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/VECTOR/clasificacion-regiones-7-b250m')
+  .filterMetadata("id_regionc", "equals", param.regionId);
+
+var regionMask = region
+  .map(function(item) { return item.set('version', 1); })
+  .reduceToImage(['version'], ee.Reducer.first());
+
+// Optional: load Sentinel-2 imagery (unrelated to classification, kept for reference)
+var img = require('users/marcex001/Snippets_Marcelo:sentinel2');
+img.img_s2(2017, 2024, region);
+
+var geom = ee.FeatureCollection(region.geometry().bounds())
+  .map(function(item) { return item.set('version', 1); })
+  .reduceToImage(['version'], ee.Reducer.first());
+
+// Input parameters
+var country = param.country;
+var regionId = param.regionId;
+var variables = param.variables;
+var outputVersion = param.outputVersion;
+var trees = param.trees;
+var additionalSamples = param.additionalSamples;
+var allYears = param.years;
+var yearsPreview = param.yearsPreview;
+var driveFolder = param.driveFolder;
+var samplesVersion = param.samplesVersion;
+
+// Asset paths
+var assets = {
+  grids: 'projects/mapbiomas-raisg/DATOS_AUXILIARES/VECTORES/grid-world',
+  regions: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/VECTOR/clasificacion-regiones-7-b250m',
+  regionsRaster: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/RASTER/clasificacion-regiones-7',
+  mosaics: {
+    v1: 'projects/nexgenmap/MapBiomas2/LANDSAT/PANAMAZON/mosaics-2', // 1985-2022
+    v2: 'projects/mapbiomas-raisg/MOSAICOS/mosaics-2',               // 2023
+    v3: 'projects/mapbiomas-bolivia/assets/MOSAICS/mosaics-2',        // 2024
+  },
+  referenceImage: 'projects/mapbiomas-public/assets/bolivia/collection2/mapbiomas_bolivia_collection2_integration_v1',
+  /*
+ * NOTE: The asset paths below are examples from the original script.
+ * You must replace them with your own Earth Engine asset paths, especially
+ * the 'outputs' path where your classification results will be stored.
+ * Ensure you have write permissions to the output folder.
+ */
+  stablePixels: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/01-stable-sample/',
+  classAreas: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/02-CLASS-AREA/',
+  samplesPath: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/03-TRAIN-SAMPLE/',
+  outputs: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/classification'
+};
+
+var basePath = assets.outputs;
+var trainingSamples = assets.samplesPath + 'samples-' + country + '-' + regionId;
+var assetMosaic = assets.mosaics.v1;
+var assetMosaic23 = assets.mosaics.v2;
+var assetMosaic24 = assets.mosaics.v3;
+
+// Colour palettes
+var palette = [
+  'ffffff', '129912', '1f4423', '1f8d49', '7dc975', '687537', '76A5AF',
+  '29eee4', '77a605', '935132', 'bbfcac', '519799', 'd6bc74', 'F1C232',
+  'ffffb2', 'edde8e', 'f6b26b', 'f99f40', 'E974ED', 'd5a6bd', 'c27ba0',
+  'ffefc3', 'ea9999', 'ffa07a', 'aa0000', 'ff8585', '0000ff', 'd5d5e5',
+  'dd497f', 'ffaa5f', 'ff0000', '8a2be2', '968c46', '2532e4', '93dfe6',
+  'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+  'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+  'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+  'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', 'f5d5d5', 'efffea',
+  'dd497f', 'b2ae7c', 'af2a2a', 'a89358', '968c46', 'ff99b9', '4fd3ff',
+  'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff'
+];
+
+var vis = { min: 0, max: 76, palette: palette };
+var vismos = {
+  bands: ['swir1_median', 'nir_median', 'red_median'],
+  gain: [0.08, 0.06, 0.2],
+  gamma: 0.65
+};
+var vismos_dry = {
+  bands: ['swir1_dry', 'nir_dry', 'red_dry'],
+  gain: [0.08, 0.06, 0.2],
+  gamma: 0.65
+};
+
+// Handle years with missing data
+var missingYears = [];
+var years = ee.List(allYears).removeAll(missingYears);
+
+// Output collections
+var variablesImportance = ee.FeatureCollection([]);
+var classified = ee.Image(0);
+
+// Load mosaics
+var mosaicRegion = param.regionId.toString().slice(0, 3);
+if (mosaicRegion === '211' || mosaicRegion === '205') { mosaicRegion = '210'; }
+
+var joinedMosaics = ee.ImageCollection(assetMosaic)
+  .merge(ee.ImageCollection(assetMosaic23))
+  .merge(ee.ImageCollection(assetMosaic24))
+  .filterBounds(region);
+
+// Helper function to generate additional samples from drawn polygons
+var resampleCover = function(mosaic, additionalSamples) {
+  var polygons = additionalSamples.polygons;
+  var classIds = additionalSamples.classes;
+  var points = additionalSamples.points;
+  var newSamples = [];
+
+  polygons.forEach(function(polygon, i) {
+    var newSample = mosaic.sample({
+      numPixels: points[i],
+      region: polygon,
+      scale: 30,
+      projection: 'EPSG:4326',
+      seed: 1,
+      geometries: true,
+      tileScale: param.tileScale
+    }).map(function(item) { return item.set('reference', classIds[i]); });
+    newSamples.push(newSample);
+  });
+
+  return ee.FeatureCollection(newSamples).flatten();
+};
+
+var ClassCol2 = ee.Image(assets.referenceImage);
+
+// Main classification loop over years
+years.evaluate(function(years, error) {
+  if (error) print(error.message);
+
+  years.forEach(function(year) {
+    var yearMosaic = joinedMosaics
+      .filterMetadata('year', 'equals', year)
+      .median()
+      .updateMask(regionMask);
+
+    if (variables.length > 0) yearMosaic = yearMosaic.select(variables);
+
+    var bands = yearMosaic.bandNames();
+    var contained = bands.containsAll(ee.List(variables));
+
+    var yearTrainingSamples = ee.FeatureCollection(
+      ee.Algorithms.If(
+        contained,
+        ee.FeatureCollection(trainingSamples + '-' + year + '-p03-' + samplesVersion),
+        null
+      )
+    );
+
+    var nClasSample = ee.List(
+      ee.Algorithms.If(
+        contained,
+        yearTrainingSamples.reduceColumns(ee.Reducer.toList(), ['reference']).get('list'),
+        null
+      )
+    );
+
+    // Apply index-based filtering if defined
+    if (param.FiltroIndices.length > 0) {
+      print('Samples before index filtering (R-' + param.regionId + '-' + year + '): ', yearTrainingSamples.size());
+      var tempPtos;
+      param.FiltroIndices.forEach(function(Ind) {
+        tempPtos = yearTrainingSamples
+          .filter(ee.Filter.eq('reference', Ind[0]))
+          .filter(ee.Filter.gte(Ind[1], Ind[2]))
+          .filter(ee.Filter.lte(Ind[1], Ind[3]));
+        yearTrainingSamples = yearTrainingSamples.filter(ee.Filter.neq('reference', Ind[0]));
+        yearTrainingSamples = yearTrainingSamples.merge(tempPtos);
+      });
+      print('Samples after index filtering (R-' + param.regionId + '-' + year + '):', yearTrainingSamples.size());
+    }
+
+    nClasSample = nClasSample.reduce(ee.Reducer.countDistinct());
+
+    // Add additional samples if polygons are provided
+    if (additionalSamples.polygons.length > 0) {
+      var insidePolygons = ee.FeatureCollection(additionalSamples.polygons)
+        .flatten()
+        .reduceToImage(['id'], ee.Reducer.first());
+
+      var outsidePolygons = insidePolygons.mask().eq(0).selfMask();
+      outsidePolygons = geom.updateMask(outsidePolygons);
+
+      var outsideVector = outsidePolygons.reduceToVectors({
+        reducer: ee.Reducer.countEvery(),
+        geometry: region.geometry().bounds(),
+        scale: 30,
+        maxPixels: 1e13
+      });
+
+      var newSamples = resampleCover(yearMosaic, additionalSamples);
+      yearTrainingSamples = yearTrainingSamples.filterBounds(outsideVector).merge(newSamples);
+    }
+
+    // Define Random Forest classifier
+    var classifier = ee.Classifier.smileRandomForest({
+      numberOfTrees: trees,
+      variablesPerSplit: 1
+    });
+
+    classifier = ee.Classifier(
+      ee.Algorithms.If(
+        contained,
+        ee.Algorithms.If(
+          ee.Algorithms.IsEqual(nClasSample, 1), // only one class present
+          null,
+          classifier.train(yearTrainingSamples, 'reference', bands)
+        ),
+        null
+      )
+    );
+
+    // Remove samples falling inside the error polygon (sacar_muestras)
+    yearTrainingSamples = yearTrainingSamples.filter(ee.Filter.bounds(sacar_muestras).not());
+
+    // Style points for visualisation (only for 2024, layer turned off by default)
+    var styledPoints = yearTrainingSamples.map(function(point) {
+      var classId = point.get('reference');
+      var color = ee.List(palette).get(classId);
+      return point.set({ style: { color: color } });
+    });
+    if (year === 2024) {
+      Map.addLayer(styledPoints.style({ styleProperty: "style", width: 1.5 }), {}, 'points ' + year, 0);
+    }
+
+    var explainer = ee.Dictionary(
+      ee.Algorithms.If(
+        contained,
+        ee.Algorithms.If(
+          ee.Algorithms.IsEqual(nClasSample, 1),
+          null,
+          classifier.explain()
+        ),
+        null
+      )
+    );
+
+    // Variable importance table
+    var importances = ee.Feature(
+      ee.Algorithms.If(
+        contained,
+        ee.Algorithms.If(
+          ee.Algorithms.IsEqual(nClasSample, 1),
+          null,
+          ee.Feature(null, ee.Dictionary(explainer.get('importance')))
+            .set('_trees', explainer.get('numberOfTrees'))
+            .set('_oobError', explainer.get('outOfBagErrorEstimate'))
+            .set('_year', year)
+        ),
+        null
+      )
+    );
+    variablesImportance = variablesImportance.merge(ee.FeatureCollection([importances]));
+
+    // Classify the year's mosaic
+    var img = yearMosaic.classify(classifier)
+      .select(['classification'], ['classification_' + year]);
+
+    var maskBand = ee.Image(27).rename('classification_' + year);
+
+    classified = ee.Image(
+      ee.Algorithms.If(
+        contained,
+        ee.Algorithms.If(
+          ee.Algorithms.IsEqual(nClasSample, 1),
+          classified.addBands(maskBand),
+          classified.addBands(img)
+        ),
+        classified.addBands(maskBand)
+      )
+    ).unmask(27).updateMask(regionMask).toByte();
+
+    // Display layers (mosaics and classifications)
+    Map.addLayer(yearMosaic, vismos_dry, 'MOSAIC-DRY-' + year.toString(), false);
+    Map.addLayer(yearMosaic, vismos, 'MOSAIC ' + year.toString(), false);
+
+    if (year <= 2023) {
+      Map.addLayer(
+        ClassCol2.select('classification_' + year).unmask(27).updateMask(regionMask),
+        vis,
+        'CLASS-MB-BO-C2-' + year,
+        false
+      );
+    } else {
+      print('No collection 2 classification for year 2024');
+    }
+
+    Map.addLayer(
+      classified.select('classification_' + year).unmask(27).updateMask(regionMask),
+      vis,
+      'CLASSIFICATION ' + year,
+      false
+    );
+
+    return classified;
+  });
+
+  classified = classified.slice(1).toInt8().set({
+    code_region: regionId,
+    pais: country,
+    version: outputVersion,
+    RFtrees: trees,
+    samples_version: samplesVersion,
+    descripcion: 'clasificacion-v1',
+    paso: 'P03'
+  });
+
+  print('Raw output image: ', classified);
+
+  // Export classification to GEE Asset
+  var filename = country + '-' + regionId + '-' + outputVersion + '-c3';
+  var imageId = basePath + '/' + filename;
+  var tableName = 'IMPORTANCE-TABLE-' + country + '-' + regionId + '-' + outputVersion;
+
+  Export.image.toAsset({
+    image: classified,
+    description: 'P03-2-' + filename,
+    assetId: imageId,
+    scale: 30,
+    pyramidingPolicy: { '.default': 'mode' },
+    maxPixels: 1e13,
+    region: region.geometry().bounds()
+  });
+
+  // Optional Drive export (commented out)
+  // Export.image.toDrive({
+  //   image: classified,
+  //   description: filename + '-DRIVE',
+  //   folder: driveFolder,
+  //   scale: 30,
+  //   maxPixels: 1e13,
+  //   region: region.geometry().bounds()
+  // });
+
+  Export.table.toDrive({
+    collection: variablesImportance,
+    description: tableName,
+    folder: driveFolder,
+    fileFormat: 'CSV',
+  });
+});

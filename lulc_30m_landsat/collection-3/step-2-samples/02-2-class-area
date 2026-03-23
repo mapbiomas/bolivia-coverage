@@ -1,0 +1,207 @@
+// STEP 2-2: SAMPLE BALANCING CALCULATION v1.1
+// MARCH 2025
+
+var param = {
+  regionId: 21001,
+  country: 'BOLIVIA',
+  referenceYear: 2023,      // specific year to use, or '' to use stable pixels
+  remap: {
+    from: [3, 4, 6, 11, 12, 29, 66, 13, 15, 18, 21, 23, 24, 30, 61, 68, 25, 33, 34, 61],
+    to:   [3, 4, 6, 11, 12, 29, 66, 13, 15, 18, 21, 23, 24, 30, 61, 68, 25, 33, 34, 61]
+  },
+  driveFolder: '',
+  inputPixelEstable: 1,
+  ouputVersion: 1,
+};
+
+// Self‑invoked function that executes the workflow
+(function init(param) {
+  
+  var assets = {
+    regions: 'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/VECTOR/clasificacion-regiones-7-b250m',
+    regionsRaster:  'projects/mapbiomas-bolivia/assets/AUXILIARY-DATA/RASTER/clasificacion-regiones-7',
+    mosaics: {
+      v1: 'projects/nexgenmap/MapBiomas2/LANDSAT/PANAMAZON/mosaics-2', // 1985-2022
+      v2: 'projects/mapbiomas-raisg/MOSAICOS/mosaics-2',               // 2023
+      v3: 'projects/mapbiomas-bolivia/assets/MOSAICS/mosaics-2',        // 2024
+    },
+    referenceImage: 'projects/mapbiomas-public/assets/bolivia/collection2/mapbiomas_bolivia_collection2_integration_v1',
+/*
+ * NOTE: The asset paths below are examples from the original script.
+ * You must replace them with your own Earth Engine asset paths, especially
+ * the 'outputs' path where your classification results will be stored.
+ * Ensure you have write permissions to the output folder.
+ */
+    basePath: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/',
+    stablePixels: 'projects/mapbiomas-bolivia/assets/LAND-COVER/COLLECTION-3/GENERAL/SAMPLES/01-stable-sample/',
+  };
+  
+  var version = param.ouputVersion;
+  
+  // Get region of interest (vector + raster mask)
+  var region = getRegion(assets.regions, assets.regionsRaster, param.regionId);
+  var rasterMask = region.rasterMask;
+
+  var country = region.vector.first().get('PAIS').getInfo().toUpperCase()
+      .replace('Ú', 'U')
+      .replace(' ', '_');
+      
+  var baseName = country + '-' + param.regionId + '-' + param.inputPixelEstable;
+  
+  var classes = ee.List.sequence(1, 61).getInfo();
+  
+  var reference, updtReference;
+  
+  if (param.referenceYear) {
+    // Use a specific reference year (after remapping)
+    reference = ee.Image(assets.referenceImage)
+      .select('classification_' + param.referenceYear.toString())
+      .updateMask(rasterMask);
+
+    var originalClasses = param.remap.from;
+    var newClasses = param.remap.to;
+    updtReference = remapBands(reference, originalClasses, newClasses);
+  } else {
+    // Use the previously generated stable pixels image
+    updtReference = ee.Image(assets.stablePixels + 'ME-' + baseName);
+  }
+  
+  // Compute area (in hectares) per class inside the region
+  var areas = getAreas(updtReference, classes, region.vector);
+  
+  print('Area per class layer', areas);
+  
+  // Colour palette for visualisation (same as MapBiomas collection)
+  var palette = [
+    'ffffff', '129912', '1f4423', '1f8d49', '7dc975', '687537', '76A5AF',
+    '29eee4', '77a605', '935132', 'bbfcac', '519799', 'd6bc74', 'F1C232',
+    'ffffb2', 'edde8e', 'f6b26b', 'f99f40', 'E974ED', 'd5a6bd', 'c27ba0',
+    'ffefc3', 'ea9999', 'ffa07a', 'aa0000', 'ff8585', '0000ff', 'd5d5e5',
+    'dd497f', 'ffaa5f', 'ff0000', '8a2be2', '968c46', '2532e4', '93dfe6',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', 'f5d5d5', 'efffea',
+    'dd497f', 'b2ae7c', 'af2a2a', 'a89358', '968c46', 'ff99b9', '4fd3ff',
+    'dd497f', 'b2ae7c', 'af2a2a', '8a2be2', '968c46', '0000ff', '4fd3ff'
+  ];
+  
+  var vis = { min: 0, max: 76, palette: palette };
+  Map.addLayer(updtReference, vis, 'Reference image');
+
+  // Export area table to GEE Asset and optionally to Google Drive
+  var tableName = 'ac-' + country + '-' + param.regionId + '-' + param.ouputVersion;
+  var outputPath = assets.basePath + '02-CLASS-AREA/';
+
+  print('Output location', outputPath);
+  print('Output file', tableName);
+  
+  exportFeatures(areas, tableName, outputPath + tableName, param.driveFolder);
+
+})(param);
+
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+// Remap class values in an image (works for single‑ or multi‑band)
+function remapBands(image, originalClasses, newClasses) {
+  var bandNames = image.bandNames().getInfo();
+  var collectionList = ee.List([]);
+  
+  bandNames.forEach(function(bandName) {
+    var remapped = image.select(bandName)
+      .remap(originalClasses, newClasses);
+    collectionList = collectionList.add(remapped.int8().rename(bandName));
+  });
+  var collectionRemap = ee.ImageCollection(collectionList);
+  image = collectionRemap.toBands();
+
+  var actualBandNames = image.bandNames();
+  var singleClass = actualBandNames.slice(1)
+    .iterate(function(bandName, previousBand) {
+        bandName = ee.String(bandName);
+        previousBand = ee.Image(previousBand);
+        return previousBand.addBands(image
+          .select(bandName)
+          .rename(ee.String('classification_')
+          .cat(bandName.split('_').get(2))));
+      },
+      ee.Image(image.select([actualBandNames.get(0)])
+        .rename(ee.String('classification_')
+        .cat(ee.String(actualBandNames.get(0)).split('_').get(2))))
+    );
+  return ee.Image(singleClass);
+}
+
+// Compute area (in hectares) per class and attach as properties to region features
+function getAreas(image, classes, region) {
+  var reducer = {
+    reducer: ee.Reducer.sum(),
+    geometry: region.geometry(),
+    scale: 30,
+    maxPixels: 1e13
+  };
+  
+  var propFilter = ee.Filter.neq('item', 'OBJECTID');
+  
+  classes.forEach(function(classId, i) {
+    var imageArea = ee.Image.pixelArea()
+      .divide(10000)               // convert to hectares
+      .mask(image.eq(classId))
+      .reduceRegion(reducer);
+      
+    var area = ee.Number(imageArea.get('area')).round();
+          
+    region = region.map(function(item) {
+      var props = item.propertyNames();
+      var selectProperties = props.filter(propFilter);
+      return item
+        .select(selectProperties)
+        .set('ID' + classId.toString(), area);
+    });
+    
+    return region;
+  });
+  
+  return region;
+}
+
+// Extract region of interest from vector and raster masks
+function getRegion(regionPath, regionImagePath, regionId) {
+  var region = ee.FeatureCollection(regionPath)
+    .filterMetadata("id_regionc", "equals", regionId);
+  
+  var setVersion = function(item) { return item.set('version', 1); };
+  var regionMask = region
+    .map(setVersion)
+    .reduceToImage(['version'], ee.Reducer.first());
+    
+  return {
+    vector: region,
+    rasterMask: regionMask
+  };
+}
+
+// Export feature collection to GEE Asset and optionally to Google Drive (as CSV)
+function exportFeatures(features, tableName, tableId, driveFolder) {
+  Export.table.toAsset({
+    collection: features,
+    description: 'P02-2-' + tableName,
+    assetId: tableId,
+  });
+  
+  // For Drive export we only need the first feature's properties (as a single‑row CSV)
+  var featuresTable = ee.FeatureCollection([
+    ee.Feature(null, features.first().toDictionary())
+  ]);
+  
+  if (driveFolder !== '' && driveFolder) {
+    Export.table.toDrive({
+      collection: featuresTable,
+      description: tableName + '-DRIVE',
+      folder: driveFolder,
+      fileFormat: 'CSV',
+    });
+  }
+}
