@@ -1,4 +1,4 @@
-![MapBiomas Bolivia](https://bolivia.mapbiomas.org/wp-content/uploads/sites/15/2024/03/mapbiomas-bolivia.png)
+![MapBiomas Bolivia](https://bolivia.mapbiomas.org/wp-content/uploads/sites/5/2026/08/logo_mapbiomas_Bolivia-1.png)
 
 # 🌿 MapBiomas Bolivia – Land Cover Classification Scripts
 
